@@ -40,6 +40,24 @@ fn test_stow_command() {
 }
 
 #[test]
+fn test_stow_fails_when_tracked_file_is_missing() {
+    let temp_dir = setup_git_repo();
+    let metadata_path = temp_dir.path().join("test.metadata");
+
+    fs::remove_file(temp_dir.path().join("test.txt")).unwrap();
+
+    let err = stow(&metadata_path, 0, true, temp_dir.path()).unwrap_err();
+    assert!(matches!(
+        err,
+        HoldError::PartialFileProcessing {
+            failed: 1,
+            total: 1,
+        }
+    ));
+    assert!(!metadata_path.exists());
+}
+
+#[test]
 fn test_stow_from_subdirectory() {
     let temp_dir = setup_git_repo();
 
@@ -72,6 +90,24 @@ fn test_salvage_from_subdirectory() {
 
     // Now run salvage from subdirectory
     salvage(&metadata_path, 0, false, &subdir).unwrap();
+}
+
+#[test]
+fn test_salvage_fails_when_tracked_file_is_missing() {
+    let temp_dir = setup_git_repo();
+    let metadata_path = temp_dir.path().join("test.metadata");
+
+    stow(&metadata_path, 0, true, temp_dir.path()).unwrap();
+    fs::remove_file(temp_dir.path().join("test.txt")).unwrap();
+
+    let err = salvage(&metadata_path, 0, true, temp_dir.path()).unwrap_err();
+    assert!(matches!(
+        err,
+        HoldError::PartialFileProcessing {
+            failed: 1,
+            total: 1,
+        }
+    ));
 }
 
 #[test]

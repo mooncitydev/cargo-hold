@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use crate::discovery::discover_tracked_files;
-use crate::error::Result;
+use crate::error::{HoldError, Result};
 use crate::hashing::{get_file_size, hash_file};
 use crate::logging::Logger;
 use crate::metadata::load_metadata;
@@ -39,7 +39,12 @@ pub fn salvage(metadata_path: &Path, verbose: u8, quiet: bool, working_dir: &Pat
 
     let new_mtime = generate_monotonic_timestamp(&metadata);
 
-    let (repo_root, tracked_files, symlink_count) = discover_tracked_files(working_dir)?;
+    let discovered = discover_tracked_files(working_dir)?;
+    let total_processable = discovered.processable_count();
+    let repo_root = discovered.repo_root;
+    let tracked_files = discovered.files;
+    let symlink_count = discovered.symlink_count;
+    let inaccessible_files = discovered.inaccessible_files;
 
     if !log.quiet() && symlink_count > 0 {
         eprintln!(
@@ -47,6 +52,28 @@ pub fn salvage(metadata_path: &Path, verbose: u8, quiet: bool, working_dir: &Pat
             symlink_count,
             if symlink_count == 1 { "" } else { "s" }
         );
+    }
+
+    if !inaccessible_files.is_empty() {
+        if !log.quiet() {
+            eprintln!(
+                "Warning: Failed to access {} tracked file(s)",
+                inaccessible_files.len()
+            );
+            for path in &inaccessible_files {
+                log.verbose(
+                    1,
+                    format!("  Could not access tracked file: {}", path.display()),
+                );
+            }
+            if log.level() == 0 {
+                eprintln!("Run with -v for more details");
+            }
+        }
+        return Err(HoldError::PartialFileProcessing {
+            failed: inaccessible_files.len(),
+            total: total_processable,
+        });
     }
 
     let (unchanged, modified, added) =

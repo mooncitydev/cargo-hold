@@ -4,6 +4,25 @@ use git2::{Index, Repository};
 
 use crate::error::HoldError;
 
+/// Files discovered from the Git index.
+pub(crate) struct TrackedFiles {
+    /// Repository root path.
+    pub(crate) repo_root: PathBuf,
+    /// Tracked regular files that can be processed.
+    pub(crate) files: Vec<PathBuf>,
+    /// Number of tracked symbolic links skipped intentionally.
+    pub(crate) symlink_count: usize,
+    /// Tracked paths that could not be accessed on disk.
+    pub(crate) inaccessible_files: Vec<PathBuf>,
+}
+
+impl TrackedFiles {
+    /// Number of tracked paths that should have been processable.
+    pub(crate) fn processable_count(&self) -> usize {
+        self.files.len() + self.inaccessible_files.len()
+    }
+}
+
 /// Discovers all tracked files in the Git repository.
 ///
 /// This function uses the Git index to find all files that are tracked by Git,
@@ -29,9 +48,7 @@ use crate::error::HoldError;
 /// - No Git repository is found at or above the given path
 /// - The Git index cannot be accessed
 /// - Any file path contains invalid UTF-8
-pub fn discover_tracked_files(
-    repo_path: &Path,
-) -> Result<(PathBuf, Vec<PathBuf>, usize), HoldError> {
+pub(crate) fn discover_tracked_files(repo_path: &Path) -> Result<TrackedFiles, HoldError> {
     // Open the repository, searching upward from the given path
     let repo = Repository::discover(repo_path)
         .map_err(|_| HoldError::RepoNotFound(repo_path.to_path_buf()))?;
@@ -46,18 +63,25 @@ pub fn discover_tracked_files(
     let index = repo.index().map_err(HoldError::IndexError)?;
 
     // Collect all tracked file paths, filtering out symlinks
-    let (tracked_files, symlink_count) = collect_index_paths(&index, &repo_root)?;
+    let (tracked_files, symlink_count, inaccessible_files) =
+        collect_index_paths(&index, &repo_root)?;
 
-    Ok((repo_root, tracked_files, symlink_count))
+    Ok(TrackedFiles {
+        repo_root,
+        files: tracked_files,
+        symlink_count,
+        inaccessible_files,
+    })
 }
 
 /// Extract all file paths from the Git index, filtering out symlinks
 fn collect_index_paths(
     index: &Index,
     repo_root: &Path,
-) -> Result<(Vec<PathBuf>, usize), HoldError> {
+) -> Result<(Vec<PathBuf>, usize, Vec<PathBuf>), HoldError> {
     let mut paths = Vec::new();
     let mut symlink_count = 0;
+    let mut inaccessible_paths = Vec::new();
 
     for entry in index.iter() {
         // Skip submodules (mode 160000) - they appear as directories in the filesystem
@@ -85,20 +109,16 @@ fn collect_index_paths(
                     continue; // Skip symlinks
                 }
             }
-            Err(e) => {
-                eprintln!(
-                    "Warning: Could not access file '{}': {}. Skipping.",
-                    full_path.display(),
-                    e
-                );
-                continue; // Skip files we can't access
+            Err(_) => {
+                inaccessible_paths.push(path_buf);
+                continue; // Report files we can't access to the caller.
             }
         }
 
         paths.push(path_buf);
     }
 
-    Ok((paths, symlink_count))
+    Ok((paths, symlink_count, inaccessible_paths))
 }
 
 #[cfg(test)]
@@ -129,15 +149,32 @@ mod tests {
     fn test_discover_tracked_files() {
         let (temp_dir, _repo) = setup_test_repo();
 
-        let (repo_root, files, symlink_count) = discover_tracked_files(temp_dir.path()).unwrap();
+        let discovered = discover_tracked_files(temp_dir.path()).unwrap();
         // On macOS, /var is a symlink to /private/var, so we need to canonicalize paths
         assert_eq!(
-            repo_root.canonicalize().unwrap(),
+            discovered.repo_root.canonicalize().unwrap(),
             temp_dir.path().canonicalize().unwrap()
         );
-        assert_eq!(files.len(), 1);
-        assert!(files[0].ends_with("test.txt"));
-        assert_eq!(symlink_count, 0);
+        assert_eq!(discovered.files.len(), 1);
+        assert!(discovered.files[0].ends_with("test.txt"));
+        assert_eq!(discovered.symlink_count, 0);
+        assert!(discovered.inaccessible_files.is_empty());
+        assert_eq!(discovered.processable_count(), 1);
+    }
+
+    #[test]
+    fn test_discover_tracked_files_reports_missing_tracked_files() {
+        let (temp_dir, _repo) = setup_test_repo();
+        fs::remove_file(temp_dir.path().join("test.txt")).unwrap();
+
+        let discovered = discover_tracked_files(temp_dir.path()).unwrap();
+
+        assert!(discovered.files.is_empty());
+        assert_eq!(
+            discovered.inaccessible_files,
+            vec![PathBuf::from("test.txt")]
+        );
+        assert_eq!(discovered.processable_count(), 1);
     }
 
     #[test]
